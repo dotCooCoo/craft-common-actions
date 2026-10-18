@@ -1,0 +1,66 @@
+name: Verify FreeBSD aarch64 Rust
+
+on:
+  push:
+    branches: [verify/freebsd-aarch64-rust]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shared:
+    uses: ./.github/workflows/freebsd.yml
+
+  vectorcraft-aarch64:
+    name: VectorCraft cdba0aac on FreeBSD 15 aarch64 (build + test + package)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/vectorcraft
+          ref: cdba0aac03f83bbc633f5e2aa9500354648938d3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: 3d9ab3a132ed0eff457e424226a435a901da30d3
+          path: craft-fonts
+      - name: Build and test in a FreeBSD VM
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "15.1"
+          arch: aarch64
+          usesh: true
+          cpu: 4
+          mem: 12288
+          copyback: false
+          prepare: |
+            date -u
+            pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
+            date -u
+            pkg install -y rust
+            date -u
+          run: |
+            if [ -f "$HOME/.cargo/env" ]; then
+              . "$HOME/.cargo/env"
+            fi
+            git config --global --add safe.directory "*"
+            rustc --version
+            cargo --version
+            export CRAFT_FONTS_DIR="$PWD/craft-fonts" CRAFT_FONTS_REQUIRED=1
+            date -u
+            CARGO_PROFILE_DEV_DEBUG=0 cargo build --workspace --all-targets --locked
+            date -u
+            CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --locked
+            date -u
+            rm -rf target/debug
+            CARGO_BUILD_JOBS=4 bash packaging/freebsd/package.sh
+            for archive in dist/release/*-freebsd-aarch64.tar.gz; do
+              if [ ! -f "$archive" ]; then
+                echo "error: no FreeBSD aarch64 package was produced" >&2
+                exit 1
+              fi
+              tar -tzf "$archive"
+            done
+            date -u
