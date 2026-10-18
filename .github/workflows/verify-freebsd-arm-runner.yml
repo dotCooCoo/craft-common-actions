@@ -1,0 +1,87 @@
+name: Verify FreeBSD aarch64 on an ARM runner
+
+on:
+  push:
+    branches: [verify/freebsd-arm-runner]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe ubuntu-24.04-arm
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Host facts
+        run: |
+          ls -l /dev/kvm || echo "no /dev/kvm"
+          nproc
+          free -g
+          uname -a
+
+  vectorcraft-aarch64:
+    name: VectorCraft a466625c on FreeBSD 15 aarch64 on ubuntu-24.04-arm (build + test + package)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 330
+    steps:
+      - name: Host facts
+        run: |
+          date -u
+          ls -l /dev/kvm || echo "no /dev/kvm"
+          nproc
+          free -g
+          uname -a
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/vectorcraft
+          ref: a466625c8987550635cda951ebf36e08e1e80a56
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: a71c20e30af613287c504f7e685ca8fad77752bc
+          path: craft-fonts
+      - name: Build and test in a FreeBSD VM
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "15.1"
+          arch: aarch64
+          usesh: true
+          cpu: 4
+          mem: 12288
+          copyback: false
+          debug: "true"
+          prepare: |
+            date -u
+            pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
+            date -u
+            pkg install -y rust
+            date -u
+          run: |
+            [ ! -f "$HOME/.cargo/env" ] || . "$HOME/.cargo/env"
+            git config --global --add safe.directory "*"
+            rustc --version
+            cargo --version
+            sysctl -n hw.ncpu hw.model kern.vm_guest || true
+            export CRAFT_FONTS_DIR="$PWD/craft-fonts" CRAFT_FONTS_REQUIRED=1
+            echo "build start: $(date -u)"
+            CARGO_PROFILE_DEV_DEBUG=0 cargo build --workspace --all-targets --locked
+            echo "build end, test start: $(date -u)"
+            CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --locked
+            echo "test end, package start: $(date -u)"
+            rm -rf target/debug
+            CARGO_BUILD_JOBS=4 bash packaging/freebsd/package.sh
+            for archive in dist/release/*-freebsd-aarch64.tar.gz; do
+              if [ ! -f "$archive" ]; then
+                echo "error: no FreeBSD aarch64 package was produced" >&2
+                exit 1
+              fi
+              tar -tzf "$archive"
+            done
+            echo "package end: $(date -u)"
+      - name: QEMU accelerator on the host
+        if: always()
+        run: |
+          date -u
+          ps -eo args | grep '[q]emu-system' | grep -o 'accel=[a-z]*' | sort -u || echo "no qemu process"
