@@ -203,6 +203,38 @@ fi
         self.assertIn("arch", matrix)
         self.assertEqual(matrix["arch"], ["x86_64", "aarch64"])
 
+    def run_prepare(self, data, arch):
+        prepare = next(step["with"]["prepare"] for step in data["jobs"]["freebsd"]["steps"]
+                       if "with" in step and "prepare" in step["with"])
+        script = prepare.replace("${{ matrix.arch }}", arch)
+        with tempfile.TemporaryDirectory(prefix="shared-freebsd-prepare-") as directory:
+            work = Path(directory)
+            tools = work / "tools"
+            tools.mkdir()
+            log = work / "install.log"
+            (tools / "pkg").write_text('#!/bin/sh\necho "pkg $*" >> "$INSTALL_LOG"\n')
+            # The fixture installer script logs the arguments that the workflow passes to it.
+            (tools / "curl").write_text("#!/bin/sh\necho 'echo \"rustup $*\" >> \"$INSTALL_LOG\"'\n")
+            for tool in ("pkg", "curl"):
+                (tools / tool).chmod(0o755)
+            env = os.environ.copy()
+            env.update(PATH=str(tools) + os.pathsep + env["PATH"], INSTALL_LOG=str(log))
+            result = subprocess.run(["/bin/sh", "-eu", "-c", script], cwd=work, env=env,
+                                    text=True, capture_output=True, timeout=15)
+            lines = log.read_text().splitlines() if log.exists() else []
+            return dict(code=result.returncode, log=lines, output=result.stdout + result.stderr)
+
+    def test_rust_comes_from_pkg_on_aarch64_and_rustup_on_x86_64(self):
+        release_data = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+        for name, data in (("freebsd.yml", DATA), ("release.yml", release_data)):
+            for arch, expected in (("x86_64", "rustup -y --profile minimal"), ("aarch64", "pkg install -y rust")):
+                with self.subTest(workflow=name, arch=arch):
+                    result = self.run_prepare(data, arch)
+                    self.assertEqual(result["code"], 0, result)
+                    rust = [line for line in result["log"] if not line.startswith("pkg install -y bash ")]
+                    self.assertEqual(len(rust), 1, result)
+                    self.assertTrue(rust[0].startswith(expected), result)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -145,6 +145,10 @@ jobs:
 ### 4. `freebsd.yml`
 Builds and runs workspace tests across a matrix (x86_64, aarch64) inside a FreeBSD 15 VM on a Linux runner.
 
+The x86_64 job installs stable Rust with rustup. The aarch64 job installs the
+FreeBSD `rust` package, which can be older than the current stable release. A
+caller whose `rust-version` is newer than that package fails on aarch64.
+
 `craft-fonts-ref` makes the checkout available to builds, default tests and custom
 tests through `CRAFT_FONTS_DIR`. Set `require-craft-fonts: true` to also export
 `CRAFT_FONTS_REQUIRED=1` and fail before building if the checkout is missing.
