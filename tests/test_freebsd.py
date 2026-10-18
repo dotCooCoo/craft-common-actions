@@ -203,6 +203,17 @@ fi
         self.assertIn("arch", matrix)
         self.assertEqual(matrix["arch"], ["x86_64", "aarch64"])
 
+    def test_each_architecture_runs_on_a_runner_of_its_own_architecture(self):
+        # On an x86_64 runner the aarch64 VM is emulated and does not finish within the job limit.
+        release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+        for name, job in (("freebsd.yml", DATA["jobs"]["freebsd"]), ("release.yml", release["jobs"]["freebsd"])):
+            with self.subTest(workflow=name):
+                match = re.fullmatch(r"\$\{\{ matrix\.arch == '(\w+)' && '([\w.-]+)' \|\| '([\w.-]+)' \}\}", job["runs-on"])
+                self.assertIsNotNone(match, job["runs-on"])
+                arch, chosen, other = match.groups()
+                runners = {a: chosen if a == arch else other for a in job["strategy"]["matrix"]["arch"]}
+                self.assertEqual(runners, {"x86_64": "ubuntu-latest", "aarch64": "ubuntu-24.04-arm"})
+
     def vm_steps(self):
         release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
         for name, job in (("freebsd.yml", DATA["jobs"]["freebsd"]), ("release.yml", release["jobs"]["freebsd"])):
