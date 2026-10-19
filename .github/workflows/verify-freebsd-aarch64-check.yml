@@ -1,0 +1,116 @@
+name: Verify FreeBSD aarch64 check
+
+on:
+  push:
+    branches: [verify/freebsd-aarch64-check]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VECTORCRAFT_SHA: a466625c8987550635cda951ebf36e08e1e80a56
+  FONTS_REF: a71c20e30af613287c504f7e685ca8fad77752bc
+
+jobs:
+  freebsd:
+    # Same name, runner, limit and matrix as .github/workflows/freebsd.yml. The VM's
+    # prepare and run scripts are read from that file below, with VectorCraft's inputs
+    # (require-craft-fonts: true, craft-fonts-ref, run-package-check: true).
+    name: VectorCraft a466625c FreeBSD 15 ${{ matrix.arch }} (${{ matrix.arch == 'aarch64' && 'check' || 'build + test' }})
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Host facts
+        run: |
+          date -u
+          ls -l /dev/kvm || echo "no /dev/kvm"
+          nproc
+          free -g
+          uname -a
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/vectorcraft
+          ref: ${{ env.VECTORCRAFT_SHA }}
+      - name: Check out craft-fonts
+        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
+        with:
+          ref: ${{ env.FONTS_REF }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: .shared
+      - name: Read the VM scripts from the shared workflow
+        id: scripts
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          date -u
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml; }
+          /usr/bin/python3 - <<'PY'
+          import os, re, sys, uuid
+          import yaml
+
+          wf = yaml.load(open(".shared/.github/workflows/freebsd.yml"), Loader=yaml.BaseLoader)
+          job = wf["jobs"]["freebsd"]
+          step = next(s for s in job["steps"] if "with" in s and "run" in s["with"])
+          vm = step["with"]
+          arch = os.environ["ARCH"]
+          open_ = "$" + "{{ "
+          expected_runs_on = open_ + "matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}"
+          expected_name = open_ + "matrix.arch }} (" + open_ + "matrix.arch == 'aarch64' && 'check' || 'build + test' }})"
+          if job["runs-on"] != expected_runs_on or job["name"] != "FreeBSD 15 " + expected_name:
+              sys.exit("runs-on or name differs from this verify job: %r %r" % (job["runs-on"], job["name"]))
+          if job["timeout-minutes"] != "300" or job["strategy"]["matrix"]["arch"] != ["x86_64", "aarch64"]:
+              sys.exit("timeout or matrix differs from this verify job")
+          static = {"usesh": "true", "cpu": "4", "mem": "12288", "copyback": "false", "arch": open_ + "matrix.arch }}"}
+          for key, value in static.items():
+              if vm[key] != value:
+                  sys.exit("%s differs: %r" % (key, vm[key]))
+          if step["uses"] != "vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc":
+              sys.exit("freebsd-vm pin differs: " + step["uses"])
+
+          inputs = {k: v.get("default", "") for k, v in wf["on"]["workflow_call"]["inputs"].items()}
+          inputs.update({"require-craft-fonts": "true", "craft-fonts-ref": os.environ["FONTS_REF"],
+                         "run-package-check": "true"})
+
+          def expand(text):
+              def repl(match):
+                  expr = match.group(1).strip()
+                  if expr == "matrix.arch":
+                      return arch
+                  if expr == "inputs.custom-test-command != ''":
+                      return "true" if inputs["custom-test-command"] else "false"
+                  if expr.startswith("inputs.") and expr[7:] in inputs:
+                      return inputs[expr[7:]]
+                  sys.exit("unknown expression: " + expr)
+              return re.sub(r"\$\{\{(.*?)\}\}", repl, text)
+
+          prepare = 'echo "prepare start: $(date -u)"\n' + expand(vm["prepare"]) + '\necho "prepare end: $(date -u)"\n'
+          run = ("trap 'echo \"run end: $(date -u)\"' EXIT\n" + 'echo "run start: $(date -u)"\n'
+                 + "sysctl -n hw.ncpu hw.model kern.vm_guest || true\n" + expand(vm["run"]))
+          print("----- prepare -----\n" + prepare + "----- run -----\n" + run)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              for name, value in (("prepare", prepare), ("run", run)):
+                  delim = "EOF_" + uuid.uuid4().hex
+                  out.write("%s<<%s\n%s\n%s\n" % (name, delim, value, delim))
+          PY
+      - name: Build and test in a FreeBSD VM
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "15.1"
+          arch: ${{ matrix.arch }}
+          usesh: true
+          cpu: 4
+          mem: 12288
+          copyback: false
+          prepare: ${{ steps.scripts.outputs.prepare }}
+          run: ${{ steps.scripts.outputs.run }}
+      - name: QEMU accelerator on the host
+        if: always()
+        run: |
+          date -u
+          ps -eo args | grep '[q]emu-system' | grep -o 'accel=[a-z]*' | sort -u || echo "no qemu process"
