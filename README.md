@@ -143,7 +143,12 @@ jobs:
 ```
 
 ### 4. `freebsd.yml`
-Builds and runs workspace tests across a matrix (x86_64, aarch64) inside a FreeBSD 15 VM on a Linux runner.
+Runs a FreeBSD 15 VM on a Linux runner for each architecture in the matrix (x86_64, aarch64).
+The x86_64 job builds the workspace and runs its tests and the optional package check.
+The aarch64 job runs on `ubuntu-24.04-arm` and runs only
+`cargo check --workspace --all-targets --locked` with `cargo-build-extra-args`.
+No GitHub-hosted runner has KVM for an aarch64 guest, so QEMU emulates that VM,
+and a full aarch64 build and test does not finish within the job limit.
 
 `craft-fonts-ref` makes the checkout available to builds, default tests and custom
 tests through `CRAFT_FONTS_DIR`. Set `require-craft-fonts: true` to also export
@@ -156,8 +161,8 @@ Do not rely on `errexit` to catch nonfinal commands of an `&&` list followed by
 other commands; write each required test command on its own line.
 
 `run-package-check: true` requires `packaging/freebsd/package.sh` to exist and
-succeed, then requires at least one readable `*-freebsd-<arch>.tar.gz` in
-`dist/release` for each matrix architecture. Each archive is checked separately. The app's package script
+succeed, then requires at least one readable `*-freebsd-x86_64.tar.gz` in
+`dist/release`. The aarch64 job does not package. Each archive is checked separately. The app's package script
 retains responsibility for its required binaries, metadata and licence files.
 
 #### Caller Example:

@@ -23,9 +23,11 @@ TEMPLATE = next(step["with"]["run"] for step in DATA["jobs"]["freebsd"]["steps"]
 
 class FreeBSDRunTests(unittest.TestCase):
     def run_vm(self, *, command="", fail_test=0, package="valid", package_check=True,
-               skip_tests=False, fonts=False, require_fonts=False, fail_build=False, arch="x86_64"):
+               skip_tests=False, fonts=False, require_fonts=False, fail_build=False, arch="x86_64",
+               build_args=""):
         inputs = {key: value.get("default", "") for key, value in DATA["on"]["workflow_call"]["inputs"].items()}
         inputs.update({
+            "cargo-build-extra-args": build_args,
             "custom-test-command": command,
             "skip-tests": str(skip_tests).lower(),
             "run-package-check": str(package_check).lower(),
@@ -52,7 +54,7 @@ class FreeBSDRunTests(unittest.TestCase):
             cargo.write_text("""#!/bin/sh
 set -eu
 printf '%s|%s|%s|%s\\n' "$1" "${CRAFT_FONTS_DIR-}" "${CRAFT_FONTS_REQUIRED-}" "$*" >> "$PWD/cargo.log"
-if [ "$1" = build ]; then
+if [ "$1" = build ] || [ "$1" = check ]; then
   [ "$FAIL_BUILD" = false ] || exit 31
 else
   count=0
@@ -160,19 +162,22 @@ fi
         self.assertEqual(result["output"].count("stage/bin/app"), 2, result)
 
     def test_required_fonts_reach_build_and_both_test_paths(self):
-        for command in ("", "cargo test --lib\ncargo test --doc"):
-            with self.subTest(command=command):
-                result = self.run_vm(command=command, fonts=True, require_fonts=True)
+        for arch, command in (("x86_64", ""), ("x86_64", "cargo test --lib\ncargo test --doc"), ("aarch64", "")):
+            with self.subTest(arch=arch, command=command):
+                result = self.run_vm(command=command, fonts=True, require_fonts=True, arch=arch)
                 self.assertEqual(result["code"], 0, result)
+                self.assertTrue(result["log"], result)
                 for line in result["log"]:
                     _, directory, required, _ = line.split("|", 3)
                     self.assertTrue(directory.endswith("/craft-fonts"), result)
                     self.assertEqual(required, "1", result)
 
     def test_required_missing_fonts_fail_before_build(self):
-        result = self.run_vm(require_fonts=True)
-        self.assertNotEqual(result["code"], 0, result)
-        self.assertEqual(result["log"], [], result)
+        for arch in ("x86_64", "aarch64"):
+            with self.subTest(arch=arch):
+                result = self.run_vm(require_fonts=True, arch=arch)
+                self.assertNotEqual(result["code"], 0, result)
+                self.assertEqual(result["log"], [], result)
 
     def test_optional_fonts_remain_optional(self):
         for fonts in (True, False):
@@ -189,12 +194,44 @@ fi
         self.assertIn("arch", matrix)
         self.assertEqual(matrix["arch"], ["x86_64", "aarch64"])
 
-    def test_packaging_works_for_all_matrix_architectures(self):
-        for arch in ("x86_64", "aarch64"):
-            with self.subTest(arch=arch):
-                result = self.run_vm(package="multiple", arch=arch)
+    def test_x86_64_builds_tests_and_packages(self):
+        result = self.run_vm(package="multiple", build_args="--features heif")
+        self.assertEqual(result["code"], 0, result)
+        self.assertEqual([line.split("|", 3)[3] for line in result["log"]],
+                         ["build --workspace --all-targets --locked --features heif",
+                          "test --workspace --locked"], result)
+        self.assertEqual(result["output"].count("stage/bin/app"), 2, result)
+
+    def test_aarch64_runs_cargo_check_only(self):
+        # Neither the default tests, a custom test command nor a requested package check runs.
+        for command, skip_tests in (("", False), ("cargo test --lib\ncargo test --doc", False), ("", True)):
+            with self.subTest(command=command, skip_tests=skip_tests):
+                result = self.run_vm(arch="aarch64", command=command, skip_tests=skip_tests,
+                                     build_args="--features heif")
                 self.assertEqual(result["code"], 0, result)
-                self.assertEqual(result["output"].count("stage/bin/app"), 2, result)
+                self.assertEqual([line.split("|", 3)[3] for line in result["log"]],
+                                 ["check --workspace --all-targets --locked --features heif"], result)
+                self.assertFalse(result["packaged"], result)
+
+    def test_aarch64_check_failure_is_fatal(self):
+        result = self.run_vm(arch="aarch64", fail_build=True)
+        self.assertEqual(result["code"], 31, result)
+        self.assertEqual(len(result["log"]), 1, result)
+
+    def test_aarch64_runs_on_an_arm_runner_and_names_the_check(self):
+        job = DATA["jobs"]["freebsd"]
+
+        def evaluate(text, arch):
+            # Expand `${{ matrix.arch == 'a' && 'b' || 'c' }}` and `${{ matrix.arch }}` for one architecture.
+            def choose(match):
+                return match.group(2) if arch == match.group(1) else match.group(3)
+            text = re.sub(r"\$\{\{ matrix\.arch == '(\w+)' && '([^']*)' \|\| '([^']*)' \}\}", choose, text)
+            return text.replace("${{ matrix.arch }}", arch)
+
+        self.assertEqual({arch: evaluate(job["runs-on"], arch) for arch in job["strategy"]["matrix"]["arch"]},
+                         {"x86_64": "ubuntu-latest", "aarch64": "ubuntu-24.04-arm"})
+        self.assertEqual(evaluate(job["name"], "x86_64"), "FreeBSD 15 x86_64 (build + test)")
+        self.assertEqual(evaluate(job["name"], "aarch64"), "FreeBSD 15 aarch64 (check)")
 
     def test_release_workflow_freebsd_matrix(self):
         release_path = ROOT / ".github/workflows/release.yml"
